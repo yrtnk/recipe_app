@@ -5,19 +5,26 @@ import streamlit as st
 
 from db import Book, DuplicateFormulationIdError, Formulation, Sheet, SessionLocal, init_db, save_parsed_workbook
 from parser import parse_workbook
-from user_profile import clear_profile, load_profile, save_profile
 
 st.set_page_config(page_title="試作レシピ管理", layout="wide")
 init_db()
 
 # =========================================================
-# サイドバー：ログイン（メールアドレス＋氏名。一度入力すればローカルに記憶される）
+# サイドバー：ログイン
+#
+# ローカル版（user_profile.jsonにファイルとして記憶する方式）との違い:
+#   このクラウド版は複数人が同じ1つのアプリインスタンスにアクセスするため、
+#   ファイルに保存すると他の人のログイン状態を上書きしてしまう。
+#   そのため st.session_state（ブラウザのタブ単位のメモリ）に保持する方式にしている。
+#   → ブラウザ・タブを閉じると再ログインが必要（ローカル版のような永続記憶はしない）。
 # =========================================================
 st.sidebar.header("ログイン")
-profile = load_profile()
 
-if profile is None:
-    st.sidebar.write("初回のみ入力してください。次回からは自動でログインされます。")
+if "profile" not in st.session_state:
+    st.session_state.profile = None
+
+if st.session_state.profile is None:
+    st.sidebar.write("このタブでの利用中だけ保持されます（閉じると再入力が必要です）。")
     with st.sidebar.form("login_form"):
         email = st.text_input("メールアドレス")
         name = st.text_input("氏名")
@@ -25,21 +32,22 @@ if profile is None:
         submitted = st.form_submit_button("ログイン")
     if submitted:
         if email and name and author_code:
-            save_profile(email, name, author_code)
+            st.session_state.profile = {"email": email.strip(), "name": name.strip(), "author_code": author_code.strip()}
             st.rerun()
         else:
             st.sidebar.error("すべての項目を入力してください。")
     current_user_code = None
 else:
+    profile = st.session_state.profile
     st.sidebar.success(f"{profile['name']} さん")
     st.sidebar.caption(f"{profile['email']} / 作成者コード: {profile['author_code']}")
-    if st.sidebar.button("別のユーザーでログインし直す"):
-        clear_profile()
+    if st.sidebar.button("ログアウト"):
+        st.session_state.profile = None
         st.session_state.pop("uploaded_books", None)
         st.rerun()
     current_user_code = profile["author_code"]
 
-st.title("試作レシピ管理")
+st.title("試作レシピ管理（クラウド共有版）")
 
 tab_upload, tab_mypage, tab_search = st.tabs(["アップロード", "マイページ", "検索"])
 
