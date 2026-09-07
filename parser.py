@@ -168,15 +168,32 @@ def parse_formulations_for_sheet(ws, sheet_name: str) -> list[FormulationData]:
     return results
 
 
+def _sheet_is_touched(sheet: "SheetData", has_formulations: bool) -> bool:
+    """デフォルト値のまま（何も入力されていない）試作シートかどうかを判定する。
+    ステータスは常に「作成中」が初期値として入っているため、判定対象には含めない。
+    """
+    fields = [
+        sheet.title,
+        sheet.created_by,
+        sheet.created_by_code,
+        sheet.trial_date,
+        sheet.background_purpose,
+        sheet.conclusion,
+    ]
+    if any(not _blank(v) for v in fields):
+        return True
+    return has_formulations
+
+
 def parse_workbook(path: str) -> ParsedWorkbook:
     wb = openpyxl.load_workbook(path, data_only=True)
     warnings: list[str] = []
 
     book = parse_book(wb)
-    sheets = parse_sheets(wb, warnings)
+    all_sheets = parse_sheets(wb, warnings)
 
-    formulations: list[FormulationData] = []
-    for sheet in sheets:
+    formulations_by_sheet: dict[str, list[FormulationData]] = {}
+    for sheet in all_sheets:
         if sheet.sheet_name not in wb.sheetnames:
             warnings.append(f"{sheet.sheet_name}: 一覧には存在するが、対応するシートが見つかりません")
             continue
@@ -185,7 +202,16 @@ def parse_workbook(path: str) -> ParsedWorkbook:
         # まったくの未使用シート（タイトルも未入力）は警告の対象外にする（30枚あらかじめ用意しているため）
         if not sheet_formulations and not _blank(sheet.title):
             warnings.append(f"{sheet.sheet_name}: 配合タイトルが入力された配合が見つかりません")
-        formulations.extend(sheet_formulations)
+        formulations_by_sheet[sheet.sheet_name] = sheet_formulations
+
+    # デフォルト値のまま（何も入力されていない）試作シートは、アップロード対象から除外する
+    sheets = [
+        s for s in all_sheets
+        if _sheet_is_touched(s, bool(formulations_by_sheet.get(s.sheet_name)))
+    ]
+    formulations: list[FormulationData] = []
+    for s in sheets:
+        formulations.extend(formulations_by_sheet.get(s.sheet_name, []))
 
     return ParsedWorkbook(book=book, sheets=sheets, formulations=formulations, warnings=warnings)
 
