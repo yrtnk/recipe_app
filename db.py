@@ -92,13 +92,19 @@ def init_db():
     """テーブルを作成する。既存のDBファイルが古いスキーマ（列が足りない等）のままだった場合は、
     テーブルを自動的に作り直す（開発中の頻繁なスキーマ変更に対応するため。今のところ試作データは
     使い捨て前提なので、既存データより「起動できること」を優先する）。
+    全テーブル（books / sheets / formulations）を対象にチェックする。
     """
     inspector = inspect(_engine)
-    if inspector.has_table("sheets"):
-        existing_cols = {c["name"] for c in inspector.get_columns("sheets")}
-        expected_cols = {c.name for c in Sheet.__table__.columns}
-        if not expected_cols.issubset(existing_cols):
-            Base.metadata.drop_all(_engine)
+    needs_rebuild = False
+    for table in Base.metadata.sorted_tables:
+        if inspector.has_table(table.name):
+            existing_cols = {c["name"] for c in inspector.get_columns(table.name)}
+            expected_cols = {c.name for c in table.columns}
+            if not expected_cols.issubset(existing_cols):
+                needs_rebuild = True
+                break
+    if needs_rebuild:
+        Base.metadata.drop_all(_engine)
     Base.metadata.create_all(_engine)
 
 
