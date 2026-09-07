@@ -5,26 +5,19 @@ import streamlit as st
 
 from db import Book, DuplicateFormulationIdError, Formulation, Sheet, SessionLocal, init_db, save_parsed_workbook
 from parser import parse_workbook
+from user_profile import clear_profile, load_profile, save_profile
 
 st.set_page_config(page_title="試作レシピ管理", layout="wide")
 init_db()
 
 # =========================================================
-# サイドバー：ログイン
-#
-# ローカル版（user_profile.jsonにファイルとして記憶する方式）との違い:
-#   このクラウド版は複数人が同じ1つのアプリインスタンスにアクセスするため、
-#   ファイルに保存すると他の人のログイン状態を上書きしてしまう。
-#   そのため st.session_state（ブラウザのタブ単位のメモリ）に保持する方式にしている。
-#   → ブラウザ・タブを閉じると再ログインが必要（ローカル版のような永続記憶はしない）。
+# サイドバー：ログイン（メールアドレス＋氏名。一度入力すればローカルに記憶される）
 # =========================================================
 st.sidebar.header("ログイン")
+profile = load_profile()
 
-if "profile" not in st.session_state:
-    st.session_state.profile = None
-
-if st.session_state.profile is None:
-    st.sidebar.write("このタブでの利用中だけ保持されます（閉じると再入力が必要です）。")
+if profile is None:
+    st.sidebar.write("初回のみ入力してください。次回からは自動でログインされます。")
     with st.sidebar.form("login_form"):
         email = st.text_input("メールアドレス")
         name = st.text_input("氏名")
@@ -32,22 +25,21 @@ if st.session_state.profile is None:
         submitted = st.form_submit_button("ログイン")
     if submitted:
         if email and name and author_code:
-            st.session_state.profile = {"email": email.strip(), "name": name.strip(), "author_code": author_code.strip()}
+            save_profile(email, name, author_code)
             st.rerun()
         else:
             st.sidebar.error("すべての項目を入力してください。")
     current_user_code = None
 else:
-    profile = st.session_state.profile
     st.sidebar.success(f"{profile['name']} さん")
     st.sidebar.caption(f"{profile['email']} / 作成者コード: {profile['author_code']}")
-    if st.sidebar.button("ログアウト"):
-        st.session_state.profile = None
+    if st.sidebar.button("別のユーザーでログインし直す"):
+        clear_profile()
         st.session_state.pop("uploaded_books", None)
         st.rerun()
     current_user_code = profile["author_code"]
 
-st.title("試作レシピ管理（クラウド共有版）")
+st.title("試作レシピ管理")
 
 tab_upload, tab_mypage, tab_search = st.tabs(["アップロード", "マイページ", "検索"])
 
@@ -103,7 +95,7 @@ with tab_upload:
                 else:
                     st.info("試作シートが見つかりませんでした。")
 
-                st.markdown(f"**配合（行13〜17）一覧（{len(parsed.formulations)}件）**")
+                st.markdown(f"**配合（行9〜13）一覧（{len(parsed.formulations)}件）**")
                 if parsed.formulations:
                     st.dataframe(pd.DataFrame([f.__dict__ for f in parsed.formulations]), hide_index=True)
                 else:
@@ -120,8 +112,8 @@ with tab_upload:
                         except DuplicateFormulationIdError as e:
                             st.error(
                                 f"保存できませんでした。{e}\n\n"
-                                "考えられる原因：シートをコピーした際に作成日・作成時刻を書き換え忘れている可能性があります。"
-                                "Excel側で該当シートの作成日・作成時刻を確認し、修正してから再度アップロードしてください。"
+                                "考えられる原因：同じ作成者コードで、ごく短時間のうちに複数のブックを新規作成した"
+                                "可能性があります（ブックIDが重複しています）。"
                             )
                         else:
                             st.session_state.uploaded_books[filename]["saved"] = True
@@ -150,16 +142,17 @@ def _load_sheet_rows(book_author_code=None):
             rows.append(
                 {
                     "ブックID": book.book_id,
-                    "ブック名": book.book_name,
-                    "カテゴリー": book.category_code,
+                    "企画名": book.project_name,
+                    "カテゴリー": book.category_name or book.category_code,
+                    "ブランド名": book.brand_name,
                     "試作No": sheet.trial_no,
                     "シート名": sheet.sheet_name,
-                    "配合ID": sheet.formulation_id,
+                    "試作ID": sheet.formulation_id,
                     "タイトル": sheet.title,
                     "ステータス": sheet.status,
                     "作成者": sheet.created_by,
                     "作成者コード": sheet.created_by_code,
-                    "作成日": sheet.created_date,
+                    "試作日": sheet.trial_date,
                     "背景・目的": sheet.background_purpose,
                     "結論": sheet.conclusion,
                     "sheet_pk": sheet.id,
@@ -250,7 +243,7 @@ with tab_search:
         sort_col1, sort_col2 = st.columns(2)
         with sort_col1:
             sort_key = st.selectbox(
-                "並び替え", ["作成日", "タイトル", "ブックID", "試作No", "ステータス"]
+                "並び替え", ["試作日", "タイトル", "ブックID", "試作No", "ステータス"]
             )
         with sort_col2:
             sort_desc = st.checkbox("降順にする", value=True)
