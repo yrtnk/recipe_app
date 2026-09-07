@@ -1,4 +1,11 @@
-"""SQLite上のテーブル定義と保存処理（今回のスコープ: Book / Sheet / Formulation のみ）。"""
+"""SQLite上のテーブル定義と保存処理（今回のスコープ: Book / Sheet / Formulation のみ）。
+
+日時・配合IDの方針:
+  - 配合ID・作成日時はExcel側（表紙・試作シート・試作一覧の数式）で組み立てられたものを、
+    そのまま正式なIDとしてDBに保存する。
+  - ブック単位の作成日時はExcelファイル自体のプロパティ（parser.BookData.file_created_at）を使う。
+  - 別のブックと配合IDが衝突している場合はエラーとして検知する（DuplicateFormulationIdError）。
+"""
 from __future__ import annotations
 
 import datetime
@@ -34,10 +41,9 @@ class Book(Base):
     category_code = Column(String)
     created_by = Column(String)
     created_by_code = Column(String)
-    created_date = Column(String)
-    created_time = Column(String)
+    file_created_at = Column(DateTime)  # Excelファイル自体の作成日時
     source_filename = Column(String)
-    imported_at = Column(DateTime, default=datetime.datetime.utcnow)
+    imported_at = Column(DateTime, default=datetime.datetime.utcnow)  # 最後にアップロードされた日時
 
     sheets = relationship("Sheet", back_populates="book", cascade="all, delete-orphan")
 
@@ -96,6 +102,20 @@ def get_known_user_codes() -> list[str]:
         session.close()
 
 
+class DuplicateFormulationIdError(Exception):
+    """別のブックに属するシートと配合IDが衝突している場合に送出する。"""
+
+    def __init__(self, sheet_name: str, formulation_id: str, other_book_id: str, other_sheet_name: str):
+        self.sheet_name = sheet_name
+        self.formulation_id = formulation_id
+        self.other_book_id = other_book_id
+        self.other_sheet_name = other_sheet_name
+        super().__init__(
+            f"{sheet_name} の配合ID「{formulation_id}」は、別のブック「{other_book_id}」の"
+            f"「{other_sheet_name}」で既に使われています。作成日・作成時刻をご確認ください。"
+        )
+
+
 def _to_str(v):
     """openpyxlが返す日付/時刻オブジェクトを表示用の文字列に統一する。"""
     if v is None:
@@ -105,10 +125,38 @@ def _to_str(v):
     return str(v)
 
 
+def check_cross_book_duplicates(session, book_id_str: str, sheets: list) -> None:
+    """アップロードしようとしているシートの配合IDが、他のブックで既に使われていないか確認する。
+    プレースホルダー「(入力待ち)」や空欄は対象外（未確定なので重複扱いしない）。
+    """
+    for s in sheets:
+        fid = s.formulation_id
+        if not fid or fid == "(入力待ち)":
+            continue
+        existing = (
+            session.query(Sheet, Book)
+            .join(Book, Sheet.book_id == Book.id)
+            .filter(Sheet.formulation_id == fid, Book.book_id != book_id_str)
+            .first()
+        )
+        if existing:
+            existing_sheet, existing_book = existing
+            raise DuplicateFormulationIdError(
+                sheet_name=s.sheet_name,
+                formulation_id=fid,
+                other_book_id=existing_book.book_id,
+                other_sheet_name=existing_sheet.sheet_name,
+            )
+
+
 def save_parsed_workbook(parsed: ParsedWorkbook, source_filename: str) -> dict:
-    """パース結果をDBに保存する（book_idが既存なら更新、シート/配合は洗い替え）。"""
+    """パース結果をDBに保存する（book_idが既存なら更新、シート/配合は洗い替え）。
+    別のブックと配合IDが衝突している場合は DuplicateFormulationIdError を送出する。
+    """
     session = SessionLocal()
     try:
+        check_cross_book_duplicates(session, parsed.book.book_id, parsed.sheets)
+
         book = session.query(Book).filter_by(book_id=parsed.book.book_id).one_or_none()
         if book is None:
             book = Book(book_id=parsed.book.book_id)
@@ -119,8 +167,7 @@ def save_parsed_workbook(parsed: ParsedWorkbook, source_filename: str) -> dict:
         book.category_code = parsed.book.category_code
         book.created_by = parsed.book.created_by
         book.created_by_code = parsed.book.created_by_code
-        book.created_date = _to_str(parsed.book.created_date)
-        book.created_time = _to_str(parsed.book.created_time)
+        book.file_created_at = parsed.book.file_created_at
         book.source_filename = source_filename
         book.imported_at = datetime.datetime.utcnow()
         session.flush()  # book.id を確定させる
