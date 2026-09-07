@@ -1,11 +1,32 @@
 """
-recipe_template.xlsx（表紙・コード表・試作シートN・試作一覧）を読み取り、
+recipe_template.xlsx（使い方・コード表・表紙・試作一覧・試作1〜30）を読み取り、
 構造化データ（book / sheets / formulations）に変換するパーサー。
 
 今回のスコープ:
-  - 配合表（原料・配合量）はまだ扱わない
+  - 配合表（原料・配合量・パーツ・画像貼付け欄・試作条件・測定結果）はまだ扱わない
   - 試作一覧シートの内容（シート単位のメタデータ）
-  - 各試作シートの13〜17行目（配合No・配合タイトル・配合目的意図・配合結果・試作評価）
+  - 各試作シートの9〜13行目（配合No・配合タイトル・配合目的意図・配合結果・試作評価）
+
+表紙のレイアウト:
+  B3=企画ID  D3=企画名
+  B4=カテゴリーコード  D4=カテゴリー名
+  B5=作成者  D5=作成者コード
+  B6=ブランド名
+  B7=ブック作成日（自動計算）  D7=ブック作成時刻（自動計算）
+  B8=ブックID（自動計算。カテゴリーコードではなく作成者コード＋ブック作成日時から組み立てる）
+
+試作Nシートのレイアウト:
+  B1=試作ID（自動計算）  F1=ステータス
+  B2=タイトル
+  B3=作成者  D3=作成者コード（自動計算）  F3/G3/H3=試作日（年/月/日）  I3=試作日（組み立て済み表示用）
+  B4=背景・目的
+  B5=結論
+  B6=次のアクション
+  9〜13行目=配合No/配合タイトル/配合目的意図/配合結果/試作評価（配合列はC,E,G,...Yの12列）
+
+試作一覧のレイアウト（列）:
+  A=試作No  B=シート名  C=試作ID  D=タイトル  E=ステータス  F=作成者  G=作成者コード
+  H=試作日（年/月/日から組み立てた表示用文字列）  I=背景・目的  J=結論
 
 前提:
   - このファイルは Excel（または recalc 済み）で一度保存されていること。
@@ -14,7 +35,6 @@ recipe_template.xlsx（表紙・コード表・試作シートN・試作一覧�
 """
 from __future__ import annotations
 
-import datetime
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -23,40 +43,38 @@ from openpyxl.utils import get_column_letter
 
 PAIR_START_COLS = [3 + 2 * i for i in range(12)]  # C,E,G,...,Y (12配合)
 FORMULATION_META_ROWS = {
-    "formulation_no": 13,
-    "formulation_title": 14,
-    "purpose_intent": 15,
-    "result": 16,
-    "evaluation": 17,
+    "formulation_no": 9,
+    "formulation_title": 10,
+    "purpose_intent": 11,
+    "result": 12,
+    "evaluation": 13,
 }
 
 
 @dataclass
 class BookData:
-    book_id: Optional[str]
-    book_name: Optional[str]
+    book_id: Optional[str]  # 表紙!B8（自動生成）
     project_id: Optional[str]
+    project_name: Optional[str]
     category_code: Optional[str]
+    category_name: Optional[str]
+    brand_name: Optional[str]
     created_by: Optional[str]
     created_by_code: Optional[str]
-    created_date: Optional[datetime.date]
-    created_time: Optional[datetime.time]
+    book_created_date: Optional[str]  # 表紙!B7（表示用文字列）
+    book_created_time: Optional[str]  # 表紙!D7（表示用文字列）
 
 
 @dataclass
 class SheetData:
     trial_no: Optional[int]
     sheet_name: Optional[str]
-    formulation_id: Optional[str]
+    formulation_id: Optional[str]  # 試作ID（自動生成）
     title: Optional[str]
     status: Optional[str]
     created_by: Optional[str]
     created_by_code: Optional[str]
-    created_date: Optional[datetime.date]
-    created_time: Optional[datetime.time]
-    updated_date: Optional[datetime.date]
-    updated_time: Optional[datetime.time]
-    completed_date: Optional[datetime.date]
+    trial_date: Optional[str]  # 年/月/日から組み立てた表示用文字列（例: 2026/07/02）
     background_purpose: Optional[str]
     conclusion: Optional[str]
 
@@ -86,14 +104,16 @@ def _blank(v):
 def parse_book(wb) -> BookData:
     ws = wb["表紙"]
     return BookData(
-        book_id=ws["B3"].value,
-        book_name=ws["D3"].value,
-        project_id=ws["B4"].value,
-        category_code=ws["D4"].value,
+        book_id=ws["B8"].value,
+        project_id=ws["B3"].value,
+        project_name=ws["D3"].value,
+        category_code=ws["B4"].value,
+        category_name=ws["D4"].value,
+        brand_name=ws["B6"].value,
         created_by=ws["B5"].value,
         created_by_code=ws["D5"].value,
-        created_date=ws["B6"].value,
-        created_time=ws["D6"].value,
+        book_created_date=ws["B7"].value,
+        book_created_time=ws["D7"].value,
     )
 
 
@@ -109,7 +129,7 @@ def parse_sheets(wb, warnings: list[str]) -> list[SheetData]:
         if not _blank(sheet_name):
             formulation_id = ws.cell(row=row, column=3).value
             if formulation_id == "(入力待ち)":
-                warnings.append(f"{sheet_name}: 配合ID未確定（作成者コード/作成日時が未入力）")
+                warnings.append(f"{sheet_name}: 試作ID未確定（表紙の作成者コードが未入力）")
             sheets.append(
                 SheetData(
                     trial_no=int(trial_no) if trial_no is not None else None,
@@ -119,13 +139,9 @@ def parse_sheets(wb, warnings: list[str]) -> list[SheetData]:
                     status=ws.cell(row=row, column=5).value,
                     created_by=ws.cell(row=row, column=6).value,
                     created_by_code=ws.cell(row=row, column=7).value,
-                    created_date=ws.cell(row=row, column=8).value,
-                    created_time=ws.cell(row=row, column=9).value,
-                    updated_date=ws.cell(row=row, column=10).value,
-                    updated_time=ws.cell(row=row, column=11).value,
-                    completed_date=ws.cell(row=row, column=12).value,
-                    background_purpose=ws.cell(row=row, column=13).value,
-                    conclusion=ws.cell(row=row, column=14).value,
+                    trial_date=ws.cell(row=row, column=8).value,
+                    background_purpose=ws.cell(row=row, column=9).value,
+                    conclusion=ws.cell(row=row, column=10).value,
                 )
             )
         row += 1
@@ -166,7 +182,8 @@ def parse_workbook(path: str) -> ParsedWorkbook:
             continue
         ws = wb[sheet.sheet_name]
         sheet_formulations = parse_formulations_for_sheet(ws, sheet.sheet_name)
-        if not sheet_formulations:
+        # まったくの未使用シート（タイトルも未入力）は警告の対象外にする（30枚あらかじめ用意しているため）
+        if not sheet_formulations and not _blank(sheet.title):
             warnings.append(f"{sheet.sheet_name}: 配合タイトルが入力された配合が見つかりません")
         formulations.extend(sheet_formulations)
 
