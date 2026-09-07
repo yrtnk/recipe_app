@@ -3,28 +3,21 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
-from db import Book, Formulation, Sheet, SessionLocal, init_db, save_parsed_workbook
+from db import Book, DuplicateFormulationIdError, Formulation, Sheet, SessionLocal, init_db, save_parsed_workbook
 from parser import parse_workbook
+from user_profile import clear_profile, load_profile, save_profile
 
 st.set_page_config(page_title="試作レシピ管理", layout="wide")
 init_db()
 
 # =========================================================
-# サイドバー：ログイン
-#
-# ローカル版（user_profile.jsonにファイルとして記憶する方式）との違い:
-#   このクラウド版は複数人が同じ1つのアプリインスタンスにアクセスするため、
-#   ファイルに保存すると他の人のログイン状態を上書きしてしまう。
-#   そのため st.session_state（ブラウザのタブ単位のメモリ）に保持する方式にしている。
-#   → ブラウザ・タブを閉じると再ログインが必要（ローカル版のような永続記憶はしない）。
+# サイドバー：ログイン（メールアドレス＋氏名。一度入力すればローカルに記憶される）
 # =========================================================
 st.sidebar.header("ログイン")
+profile = load_profile()
 
-if "profile" not in st.session_state:
-    st.session_state.profile = None
-
-if st.session_state.profile is None:
-    st.sidebar.write("このタブでの利用中だけ保持されます（閉じると再入力が必要です）。")
+if profile is None:
+    st.sidebar.write("初回のみ入力してください。次回からは自動でログインされます。")
     with st.sidebar.form("login_form"):
         email = st.text_input("メールアドレス")
         name = st.text_input("氏名")
@@ -32,71 +25,110 @@ if st.session_state.profile is None:
         submitted = st.form_submit_button("ログイン")
     if submitted:
         if email and name and author_code:
-            st.session_state.profile = {"email": email.strip(), "name": name.strip(), "author_code": author_code.strip()}
+            save_profile(email, name, author_code)
             st.rerun()
         else:
             st.sidebar.error("すべての項目を入力してください。")
     current_user_code = None
 else:
-    profile = st.session_state.profile
     st.sidebar.success(f"{profile['name']} さん")
     st.sidebar.caption(f"{profile['email']} / 作成者コード: {profile['author_code']}")
-    if st.sidebar.button("ログアウト"):
-        st.session_state.profile = None
+    if st.sidebar.button("別のユーザーでログインし直す"):
+        clear_profile()
+        st.session_state.pop("uploaded_books", None)
         st.rerun()
     current_user_code = profile["author_code"]
 
-st.title("試作レシピ管理（クラウド共有版）")
+st.title("試作レシピ管理")
 
 tab_upload, tab_mypage, tab_search = st.tabs(["アップロード", "マイページ", "検索"])
 
 # =========================================================
 # アップロードタブ
+# 複数ファイルを選択・追加できるようにし、パース結果はセッション中（ログイン中）保持する。
 # =========================================================
 with tab_upload:
-    st.write("試作ブックのExcelファイルをアップロードしてください。")
+    st.write("試作ブックのExcelファイルをアップロードしてください（複数選択可）。")
     st.caption("1つのブックに複数の作成者が混在していても問題ありません。他の人が作成したブックの代理アップロードも可能です。")
-    uploaded = st.file_uploader("Excelファイル (.xlsx)", type=["xlsx"])
 
-    if uploaded is not None:
-        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-            tmp.write(uploaded.getvalue())
-            tmp_path = tmp.name
+    if "uploaded_books" not in st.session_state:
+        st.session_state.uploaded_books = {}  # {filename: {"parsed": ParsedWorkbook, "saved": bool}}
 
-        try:
-            parsed = parse_workbook(tmp_path)
-        except Exception as e:
-            st.error(f"読み込みに失敗しました: {e}")
-        else:
-            st.subheader("プレビュー")
+    uploaded_files = st.file_uploader(
+        "Excelファイル (.xlsx)", type=["xlsx"], accept_multiple_files=True
+    )
 
-            st.markdown("**試作ブック情報**")
-            st.dataframe(pd.DataFrame([parsed.book.__dict__]), hide_index=True)
-
-            st.markdown(f"**試作シート一覧（{len(parsed.sheets)}件）**")
-            if parsed.sheets:
-                st.dataframe(pd.DataFrame([s.__dict__ for s in parsed.sheets]), hide_index=True)
+    # 今回選択されたファイルをパースしてセッションに追加（同名ファイルは上書き＝再読み込み扱い）
+    if uploaded_files:
+        for uploaded in uploaded_files:
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+                tmp.write(uploaded.getvalue())
+                tmp_path = tmp.name
+            try:
+                parsed = parse_workbook(tmp_path)
+            except Exception as e:
+                st.session_state.uploaded_books[uploaded.name] = {"parsed": None, "saved": False, "error": str(e)}
             else:
-                st.info("試作シートが見つかりませんでした。")
+                st.session_state.uploaded_books[uploaded.name] = {"parsed": parsed, "saved": False, "error": None}
 
-            st.markdown(f"**配合（行13〜17）一覧（{len(parsed.formulations)}件）**")
-            if parsed.formulations:
-                st.dataframe(pd.DataFrame([f.__dict__ for f in parsed.formulations]), hide_index=True)
-            else:
-                st.info("配合タイトルが入力された配合が見つかりませんでした。")
+    if not st.session_state.uploaded_books:
+        st.info("ファイルを選択すると、ここにプレビューが表示されます。")
+    else:
+        st.markdown(f"**保持中のファイル：{len(st.session_state.uploaded_books)}件**（ログイン中は保持されます）")
+        for filename, entry in list(st.session_state.uploaded_books.items()):
+            saved_mark = "✅ " if entry["saved"] else ""
+            with st.expander(f"{saved_mark}{filename}", expanded=not entry["saved"]):
+                if entry["error"]:
+                    st.error(f"読み込みに失敗しました: {entry['error']}")
+                    if st.button("リストから削除", key=f"remove_{filename}"):
+                        del st.session_state.uploaded_books[filename]
+                        st.rerun()
+                    continue
 
-            if parsed.warnings:
-                st.warning("　\n".join(["確認事項:"] + [f"- {w}" for w in parsed.warnings]))
+                parsed = entry["parsed"]
+                st.markdown("**試作ブック情報**")
+                st.dataframe(pd.DataFrame([parsed.book.__dict__]), hide_index=True)
 
-            if st.button("この内容をDBに保存する", type="primary"):
-                result = save_parsed_workbook(parsed, uploaded.name)
-                st.success(
-                    f"保存しました（ブックID: {result['book_id']} / "
-                    f"シート {result['sheets']}件 / 配合 {result['formulations']}件）"
-                )
+                st.markdown(f"**試作シート一覧（{len(parsed.sheets)}件）**")
+                if parsed.sheets:
+                    st.dataframe(pd.DataFrame([s.__dict__ for s in parsed.sheets]), hide_index=True)
+                else:
+                    st.info("試作シートが見つかりませんでした。")
+
+                st.markdown(f"**配合（行13〜17）一覧（{len(parsed.formulations)}件）**")
+                if parsed.formulations:
+                    st.dataframe(pd.DataFrame([f.__dict__ for f in parsed.formulations]), hide_index=True)
+                else:
+                    st.info("配合タイトルが入力された配合が見つかりませんでした。")
+
+                if parsed.warnings:
+                    st.warning("　\n".join(["確認事項:"] + [f"- {w}" for w in parsed.warnings]))
+
+                col_save, col_remove = st.columns([1, 1])
+                with col_save:
+                    if st.button("この内容をDBに保存する", type="primary", key=f"save_{filename}"):
+                        try:
+                            result = save_parsed_workbook(parsed, filename)
+                        except DuplicateFormulationIdError as e:
+                            st.error(
+                                f"保存できませんでした。{e}\n\n"
+                                "考えられる原因：シートをコピーした際に作成日・作成時刻を書き換え忘れている可能性があります。"
+                                "Excel側で該当シートの作成日・作成時刻を確認し、修正してから再度アップロードしてください。"
+                            )
+                        else:
+                            st.session_state.uploaded_books[filename]["saved"] = True
+                            st.success(
+                                f"保存しました（ブックID: {result['book_id']} / "
+                                f"シート {result['sheets']}件 / 配合 {result['formulations']}件）"
+                            )
+                with col_remove:
+                    if st.button("リストから削除", key=f"remove_{filename}"):
+                        del st.session_state.uploaded_books[filename]
+                        st.rerun()
 
 # =========================================================
-# 共通: Sheet一覧をDataFrame化するヘルパー（ブック単位の作成者コードで判定）
+# 共通: Sheet一覧をDataFrame化するヘルパー
+# book_author_code を指定すると「そのブックの作成者（表紙の作成者コード）」で絞り込む
 # =========================================================
 def _load_sheet_rows(book_author_code=None):
     session = SessionLocal()
@@ -167,17 +199,18 @@ def _render_sheet_table_with_detail(rows, empty_message, key_prefix):
 
 
 # =========================================================
-# マイページタブ：自分が作成者になっているブック（表紙の作成者コードで判定）
+# マイページタブ：自分が「作成者」である配合（シート単位の作成者コードで判定）
 # =========================================================
 with tab_mypage:
     if current_user_code is None:
         st.info("サイドバーからログインしてください。")
     else:
         st.write(f"あなた（作成者コード: {current_user_code}）が作成者になっているブックの試作一覧です。")
+        st.caption("ブックの表紙にある作成者コードで判定しています。")
         rows = _load_sheet_rows(book_author_code=current_user_code)
         _render_sheet_table_with_detail(
             rows,
-            empty_message="あなたが作成者になっているブックはまだ登録されていません。",
+            empty_message="あなたが作成者になっている試作はまだ登録されていません。",
             key_prefix="mypage",
         )
 
